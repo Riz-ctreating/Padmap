@@ -15,26 +15,23 @@ jobs:
           gradle-version: "8.7"
       - name: Tulis file proyek
         run: |
-          mkdir -p .
+          mkdir -p app/src/main/java/com/rizal/padmap app/src/main/res/values app/src/main/res/xml
           cat > settings.gradle.kts <<'EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
           rootProject.name = "PadMap"
           include(":app")
           EOF
-          mkdir -p .
           cat > build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application") version "8.5.2" apply false
               id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
           EOF
-          mkdir -p .
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2g
           android.nonTransitiveRClass=true
           EOF
-          mkdir -p app
           cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
@@ -47,8 +44,8 @@ jobs:
                   applicationId = "com.rizal.padmap"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "1.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -57,18 +54,16 @@ jobs:
               kotlinOptions { jvmTarget = "17" }
           }
           EOF
-          mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application android:label="@string/app_name" android:theme="@android:style/Theme.DeviceDefault.Light">
+              <application android:label="@string/app_name" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-                  <activity android:name=".CalibrateActivity" android:exported="false" />
                   <service
                       android:name=".PadService"
                       android:exported="true"
@@ -84,15 +79,13 @@ jobs:
               </application>
           </manifest>
           EOF
-          mkdir -p app/src/main/res/values
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <string name="app_name">PadMap</string>
-              <string name="desc">Mengubah tombol gamepad menjadi ketukan layar di titik yang kamu atur. Tidak membaca isi layar.</string>
+              <string name="desc">Mengubah tombol gamepad menjadi ketukan layar di titik yang kamu atur, dengan bola melayang untuk pemetaan. Tidak membaca isi layar.</string>
           </resources>
           EOF
-          mkdir -p app/src/main/res/xml
           cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
@@ -104,7 +97,6 @@ jobs:
               android:description="@string/desc"
               android:notificationTimeout="100" />
           EOF
-          mkdir -p app/src/main/java/com/rizal/padmap
           cat > app/src/main/java/com/rizal/padmap/Pad.kt <<'EOF'
           package com.rizal.padmap
 
@@ -112,6 +104,8 @@ jobs:
           import android.view.KeyEvent
 
           object Pad {
+              var paused = false
+
               val keys = listOf(
                   KeyEvent.KEYCODE_BUTTON_A to "A", KeyEvent.KEYCODE_BUTTON_B to "B",
                   KeyEvent.KEYCODE_BUTTON_X to "X", KeyEvent.KEYCODE_BUTTON_Y to "Y",
@@ -126,43 +120,232 @@ jobs:
 
               fun load(c: Context, code: Int): Triple<Float, Float, Boolean>? {
                   val s = prefs(c).getString("k$code", null) ?: return null
-                  val p = s.split(",")
-                  return Triple(p[0].toFloat(), p[1].toFloat(), p[2] == "1")
+                  return try {
+                      val p = s.split(",")
+                      Triple(p[0].toFloat(), p[1].toFloat(), p[2] == "1")
+                  } catch (e: Exception) {
+                      null
+                  }
               }
 
               fun save(c: Context, code: Int, x: Float, y: Float, on: Boolean) {
                   prefs(c).edit().putString("k$code", "$x,$y,${if (on) 1 else 0}").apply()
               }
+
+              fun resetKeys(c: Context) {
+                  val e = prefs(c).edit()
+                  keys.forEach { e.remove("k${it.first}") }
+                  e.apply()
+              }
+
+              fun bubbleOn(c: Context) = prefs(c).getBoolean("bubble", true)
+
+              fun setBubble(c: Context, on: Boolean) {
+                  prefs(c).edit().putBoolean("bubble", on).apply()
+              }
+
+              fun bubblePos(c: Context): Pair<Int, Int> =
+                  Pair(prefs(c).getInt("bx", 0), prefs(c).getInt("by", 300))
+
+              fun setBubblePos(c: Context, x: Int, y: Int) {
+                  prefs(c).edit().putInt("bx", x).putInt("by", y).apply()
+              }
           }
           EOF
-          mkdir -p app/src/main/java/com/rizal/padmap
           cat > app/src/main/java/com/rizal/padmap/PadService.kt <<'EOF'
           package com.rizal.padmap
 
           import android.accessibilityservice.AccessibilityService
           import android.accessibilityservice.GestureDescription
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
           import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.os.Build
           import android.util.DisplayMetrics
+          import android.view.Gravity
           import android.view.KeyEvent
+          import android.view.MotionEvent
+          import android.view.View
           import android.view.WindowManager
           import android.view.accessibility.AccessibilityEvent
+          import android.widget.Toast
+
+          class BubbleView(c: Context) : View(c) {
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+              override fun onDraw(cv: Canvas) {
+                  val r = width / 2f
+                  p.style = Paint.Style.FILL
+                  p.color = if (Pad.paused) Color.argb(235, 90, 96, 110) else Color.argb(235, 47, 163, 107)
+                  cv.drawCircle(r, r, r - 2f, p)
+                  p.style = Paint.Style.STROKE
+                  p.strokeWidth = 3f
+                  p.color = Color.WHITE
+                  cv.drawCircle(r, r, r - 3f, p)
+                  p.style = Paint.Style.FILL
+                  p.textAlign = Paint.Align.CENTER
+                  p.textSize = r * 0.7f
+                  p.isFakeBoldText = true
+                  cv.drawText("PM", r, r + p.textSize * 0.35f, p)
+              }
+          }
 
           class PadService : AccessibilityService() {
+              companion object {
+                  var inst: PadService? = null
+              }
+
+              private var wm: WindowManager? = null
+              private var bubble: View? = null
+              private var editor: PadView? = null
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  inst = this
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  refresh()
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  closeEditor(false)
+                  hideBubble()
+                  inst = null
+                  return super.onUnbind(intent)
+              }
+
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
               override fun onInterrupt() {}
 
+              fun refresh() {
+                  if (Pad.bubbleOn(this)) showBubble() else hideBubble()
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun showBubble() {
+                  val w = wm ?: return
+                  if (bubble != null) return
+                  val v = BubbleView(this)
+                  val size = dp(52)
+                  val lp = WindowManager.LayoutParams(
+                      size, size,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  val pos = Pad.bubblePos(this)
+                  lp.x = pos.first
+                  lp.y = pos.second
+                  var sx = 0f
+                  var sy = 0f
+                  var ox = 0
+                  var oy = 0
+                  var moved = false
+                  v.setOnTouchListener { _, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              sx = e.rawX
+                              sy = e.rawY
+                              ox = lp.x
+                              oy = lp.y
+                              moved = false
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - sx
+                              val dy = e.rawY - sy
+                              if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
+                              if (moved) {
+                                  lp.x = ox + dx.toInt()
+                                  lp.y = oy + dy.toInt()
+                                  w.updateViewLayout(v, lp)
+                              }
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              if (moved) {
+                                  Pad.setBubblePos(this, lp.x, lp.y)
+                              } else if (e.eventTime - e.downTime > 600) {
+                                  Pad.paused = !Pad.paused
+                                  v.invalidate()
+                                  Toast.makeText(this, if (Pad.paused) "PadMap dijeda" else "PadMap aktif", Toast.LENGTH_SHORT).show()
+                              } else {
+                                  openEditor()
+                              }
+                          }
+                      }
+                      true
+                  }
+                  w.addView(v, lp)
+                  bubble = v
+              }
+
+              private fun hideBubble() {
+                  val v = bubble ?: return
+                  try {
+                      wm?.removeView(v)
+                  } catch (e: Exception) {
+                  }
+                  bubble = null
+              }
+
+              private fun openEditor() {
+                  val w = wm ?: return
+                  if (editor != null) return
+                  val v = PadView(this) { closeEditor(true) }
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                  }
+                  w.addView(v, lp)
+                  editor = v
+                  bubble?.visibility = View.GONE
+              }
+
+              private fun closeEditor(save: Boolean) {
+                  val v = editor ?: return
+                  if (save) v.saveAll()
+                  try {
+                      wm?.removeView(v)
+                  } catch (e: Exception) {
+                  }
+                  editor = null
+                  bubble?.visibility = View.VISIBLE
+              }
+
               override fun onKeyEvent(event: KeyEvent): Boolean {
+                  val ed = editor
+                  if (ed != null) {
+                      if (event.action == KeyEvent.ACTION_DOWN) ed.flash(event.keyCode)
+                      return Pad.keys.any { it.first == event.keyCode }
+                  }
+                  if (Pad.paused) return false
                   val p = Pad.load(this, event.keyCode) ?: return false
                   if (!p.third) return false
                   if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) tap(p.first, p.second)
                   return true
               }
 
-              private fun tap(fx: Float, fy: Float) {
+              @Suppress("DEPRECATION")
+              private fun screen(): DisplayMetrics {
                   val dm = DisplayMetrics()
-                  @Suppress("DEPRECATION")
-                  (getSystemService(WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
-                  val path = Path().apply { moveTo(fx * dm.widthPixels, fy * dm.heightPixels) }
+                  wm?.defaultDisplay?.getRealMetrics(dm)
+                  return dm
+              }
+
+              private fun tap(fx: Float, fy: Float) {
+                  val dm = screen()
+                  val path = Path()
+                  path.moveTo(fx * dm.widthPixels, fy * dm.heightPixels)
                   val g = GestureDescription.Builder()
                       .addStroke(GestureDescription.StrokeDescription(path, 0, 40))
                       .build()
@@ -170,165 +353,114 @@ jobs:
               }
           }
           EOF
-          mkdir -p app/src/main/java/com/rizal/padmap
           cat > app/src/main/java/com/rizal/padmap/MainActivity.kt <<'EOF'
           package com.rizal.padmap
 
           import android.app.Activity
           import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.os.Bundle
           import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
           import android.widget.Button
           import android.widget.LinearLayout
           import android.widget.ScrollView
+          import android.widget.Switch
           import android.widget.TextView
 
           class MainActivity : Activity() {
+              private lateinit var dot: View
               private lateinit var st: TextView
+              private lateinit var sw: Switch
+              private lateinit var keys: TextView
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun bg(color: String, r: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(Color.parseColor(color))
+                  g.cornerRadius = dp(r).toFloat()
+                  return g
+              }
+
+              private fun tv(t: String, size: Float, color: String = "#FFFFFF", bold: Boolean = false): TextView {
+                  val x = TextView(this)
+                  x.text = t
+                  x.textSize = size
+                  x.setTextColor(Color.parseColor(color))
+                  if (bold) x.setTypeface(null, Typeface.BOLD)
+                  return x
+              }
+
+              private fun card(): LinearLayout {
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.setPadding(dp(16), dp(16), dp(16), dp(16))
+                  l.background = bg("#1B2438", 16)
+                  val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                  lp.bottomMargin = dp(12)
+                  l.layoutParams = lp
+                  return l
+              }
+
+              private fun btn(t: String, primary: Boolean, f: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = t
+                  b.isAllCaps = false
+                  b.setTextColor(Color.parseColor(if (primary) "#08331F" else "#FFFFFF"))
+                  b.background = bg(if (primary) "#2FA36B" else "#2B3650", 12)
+                  b.setOnClickListener { f() }
+                  val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
+                  lp.topMargin = dp(10)
+                  b.layoutParams = lp
+                  return b
+              }
 
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
-                  val l = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(40, 60, 40, 40)
-                  }
-                  val t = TextView(this).apply {
-                      text = "PadMap\n\n1. Aktifkan layanan PadMap di pengaturan Aksesibilitas.\n2. Atur posisi tombol.\n3. Buka game dalam mode landscape lalu tekan tombol gamepad.\n\nSatu tombol = satu ketukan di titik yang kamu atur."
-                      textSize = 16f
-                  }
-                  st = TextView(this).apply {
-                      textSize = 16f
-                      setPadding(0, 30, 0, 30)
-                  }
-                  fun btn(txt: String, f: () -> Unit) = Button(this).apply {
-                      text = txt
-                      setOnClickListener { f() }
-                  }
-                  l.addView(t)
-                  l.addView(st)
-                  l.addView(btn("Buka pengaturan Aksesibilitas") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
-                  l.addView(btn("Atur posisi tombol") { startActivity(Intent(this, CalibrateActivity::class.java)) })
-                  l.addView(btn("Reset semua") { Pad.prefs(this).edit().clear().apply() })
-                  setContentView(ScrollView(this).apply { addView(l) })
-              }
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(18), dp(28), dp(18), dp(28))
+                  root.addView(tv("PadMap", 30f, "#FFFFFF", true))
+                  val sub = tv("Ubah tombol gamepad jadi ketukan layar", 14f, "#9AA6C0")
+                  sub.setPadding(0, 0, 0, dp(18))
+                  root.addView(sub)
 
-              override fun onResume() {
-                  super.onResume()
-                  val en = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
-                  st.text = if (en.contains(packageName)) "Layanan: AKTIF" else "Layanan: belum aktif"
-              }
-          }
-          EOF
-          mkdir -p app/src/main/java/com/rizal/padmap
-          cat > app/src/main/java/com/rizal/padmap/CalibrateActivity.kt <<'EOF'
-          package com.rizal.padmap
+                  val c1 = card()
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  dot = View(this)
+                  val dlp = LinearLayout.LayoutParams(dp(12), dp(12))
+                  dlp.rightMargin = dp(10)
+                  dot.layoutParams = dlp
+                  st = tv("", 16f, "#FFFFFF", true)
+                  row.addView(dot)
+                  row.addView(st)
+                  c1.addView(row)
+                  c1.addView(btn("Buka pengaturan Aksesibilitas", true) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+                  root.addView(c1)
 
-          import android.app.Activity
-          import android.content.Context
-          import android.content.pm.ActivityInfo
-          import android.graphics.Canvas
-          import android.graphics.Color
-          import android.graphics.Paint
-          import android.os.Bundle
-          import android.view.MotionEvent
-          import android.view.View
+                  val c2 = card()
+                  sw = Switch(this)
+                  sw.text = "Bola melayang"
+                  sw.setTextColor(Color.WHITE)
+                  sw.textSize = 16f
+                  c2.addView(sw)
+                  val d2 = tv("Ketuk bola PM untuk membuka pemetaan di atas game. Tahan bola untuk jeda atau lanjut. Bola bisa digeser.", 13f, "#9AA6C0")
+                  d2.setPadding(0, dp(8), 0, 0)
+                  c2.addView(d2)
+                  root.addView(c2)
 
-          class CalibrateActivity : Activity() {
-              private lateinit var pv: PadView
+                  val c3 = card()
+                  c3.addView(tv("Tombol aktif", 14f, "#9AA6C0"))
+                  keys = tv("", 16f, "#FFFFFF", true)
+                  c3.addView(keys)
+                  root.addView(c3)
 
-              override fun onCreate(b: Bundle?) {
-                  super.onCreate(b)
-                  requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                  @Suppress("DEPRECATION")
-                  window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or
-                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                  pv = PadView(this)
-                  setContentView(pv)
-              }
-
-              override fun onPause() {
-                  super.onPause()
-                  pv.saveAll()
-              }
-          }
-
-          class PadView(c: Context) : View(c) {
-              private val n = Pad.keys.size
-              private val xs = FloatArray(n)
-              private val ys = FloatArray(n)
-              private val on = BooleanArray(n)
-              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-              private var cur = -1
-              private var downX = 0f
-              private var downY = 0f
-              private var moved = false
-
-              init {
-                  Pad.keys.forEachIndexed { i, k ->
-                      val s = Pad.load(c, k.first)
-                      xs[i] = s?.first ?: (0.15f + 0.1f * (i % 8))
-                      ys[i] = s?.second ?: (0.3f + 0.2f * (i / 8))
-                      on[i] = s?.third ?: (i < 4)
-                  }
-              }
-
-              fun saveAll() {
-                  Pad.keys.forEachIndexed { i, k -> Pad.save(context, k.first, xs[i], ys[i], on[i]) }
-              }
-
-              override fun onDraw(cv: Canvas) {
-                  cv.drawColor(Color.argb(235, 12, 18, 30))
-                  paint.style = Paint.Style.FILL
-                  paint.textAlign = Paint.Align.CENTER
-                  paint.color = Color.WHITE
-                  paint.textSize = 30f
-                  cv.drawText("Seret lingkaran ke posisi tombol di game. Ketuk lingkaran untuk aktif/mati. Tekan Kembali jika selesai.", width / 2f, 60f, paint)
-                  Pad.keys.forEachIndexed { i, k ->
-                      val cx = xs[i] * width
-                      val cy = ys[i] * height
-                      paint.color = if (on[i]) Color.rgb(47, 163, 107) else Color.argb(120, 120, 120, 120)
-                      cv.drawCircle(cx, cy, 52f, paint)
-                      paint.color = Color.WHITE
-                      paint.textSize = 28f
-                      cv.drawText(k.second, cx, cy + 10f, paint)
-                  }
-              }
-
-              override fun onTouchEvent(e: MotionEvent): Boolean {
-                  when (e.actionMasked) {
-                      MotionEvent.ACTION_DOWN -> {
-                          cur = -1
-                          var best = 90f
-                          for (i in 0 until n) {
-                              val d = Math.hypot((xs[i] * width - e.x).toDouble(), (ys[i] * height - e.y).toDouble()).toFloat()
-                              if (d < best) { best = d; cur = i }
-                          }
-                          downX = e.x
-                          downY = e.y
-                          moved = false
-                      }
-                      MotionEvent.ACTION_MOVE -> if (cur >= 0) {
-                          if (Math.hypot((e.x - downX).toDouble(), (e.y - downY).toDouble()) > 12) moved = true
-                          if (moved) {
-                              xs[cur] = (e.x / width).coerceIn(0f, 1f)
-                              ys[cur] = (e.y / height).coerceIn(0f, 1f)
-                              invalidate()
-                          }
-                      }
-                      MotionEvent.ACTION_UP -> if (cur >= 0) {
-                          if (!moved) on[cur] = !on[cur]
-                          Pad.save(context, Pad.keys[cur].first, xs[cur], ys[cur], on[cur])
-                          invalidate()
-                      }
-                  }
-                  return true
-              }
-          }
-          EOF
-      - name: Bangun APK
-        run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PadMap-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+                  val c4 = card()
+                  c4.addView(tv("Cara pakai", 14f, "#9AA6C0"))
+                  val how = tv("1. Aktifkan PadMap di Aksesibilitas.\n2. Buka game, lalu ketuk bola 
