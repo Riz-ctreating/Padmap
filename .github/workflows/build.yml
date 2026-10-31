@@ -463,4 +463,209 @@ jobs:
 
                   val c4 = card()
                   c4.addView(tv("Cara pakai", 14f, "#9AA6C0"))
-                  val how = tv("1. Aktifkan PadMap di Aksesibilitas.\n2. Buka game, lalu ketuk bola 
+                                    val how = tv("1. Aktifkan PadMap di Aksesibilitas.\n2. Buka game, lalu ketuk bola PM.\n3. Seret lingkaran ke tombol di layar game, lalu Simpan.\n4. Tekan tombol gamepad untuk mengetuk titik itu.", 15f)
+                  how.setPadding(0, dp(6), 0, 0)
+                  c4.addView(how)
+                  root.addView(c4)
+
+                  root.addView(btn("Reset pemetaan", false) {
+                      Pad.resetKeys(this)
+                      onResume()
+                  })
+                  val sv = ScrollView(this)
+                  sv.setBackgroundColor(Color.parseColor("#0F1626"))
+                  sv.addView(root)
+                  setContentView(sv)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  val list = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+                  val en = list.contains(packageName)
+                  st.text = if (en) "Layanan aktif" else "Layanan belum aktif"
+                  val g = GradientDrawable()
+                  g.shape = GradientDrawable.OVAL
+                  g.setColor(Color.parseColor(if (en) "#2FA36B" else "#E5534B"))
+                  dot.background = g
+                  sw.setOnCheckedChangeListener(null)
+                  sw.isChecked = Pad.bubbleOn(this)
+                  sw.setOnCheckedChangeListener { _, on ->
+                      Pad.setBubble(this, on)
+                      PadService.inst?.refresh()
+                  }
+                  val act = Pad.keys.filter { Pad.load(this, it.first)?.third == true }.map { it.second }
+                  keys.text = if (act.isEmpty()) "Belum diatur" else act.joinToString(", ")
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/rizal/padmap/PadView.kt <<'EOF'
+          package com.rizal.padmap
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.os.SystemClock
+          import android.view.MotionEvent
+          import android.view.View
+
+          class PadView(c: Context, private val onDone: () -> Unit) : View(c) {
+              private val d = resources.displayMetrics.density
+              private val n = Pad.keys.size
+              private val xs = FloatArray(n)
+              private val ys = FloatArray(n)
+              private val on = BooleanArray(n)
+              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val rSave = RectF()
+              private val rReset = RectF()
+              private var cur = -1
+              private var press = 0
+              private var downX = 0f
+              private var downY = 0f
+              private var moved = false
+              private var flashIdx = -1
+              private var flashUntil = 0L
+
+              private fun setDefault(i: Int) {
+                  xs[i] = 0.15f + 0.1f * (i % 8)
+                  ys[i] = 0.4f + 0.18f * (i / 8)
+                  on[i] = i < 4
+              }
+
+              init {
+                  Pad.keys.forEachIndexed { i, k ->
+                      val s = Pad.load(c, k.first)
+                      if (s != null) {
+                          xs[i] = s.first
+                          ys[i] = s.second
+                          on[i] = s.third
+                      } else {
+                          setDefault(i)
+                      }
+                  }
+              }
+
+              fun saveAll() {
+                  Pad.keys.forEachIndexed { i, k -> Pad.save(context, k.first, xs[i], ys[i], on[i]) }
+              }
+
+              fun flash(code: Int) {
+                  val i = Pad.keys.indexOfFirst { it.first == code }
+                  if (i < 0) return
+                  flashIdx = i
+                  flashUntil = SystemClock.uptimeMillis() + 450
+                  invalidate()
+                  postInvalidateDelayed(500)
+              }
+
+              private fun button(cv: Canvas, r: RectF, label: String, color: Int, textColor: Int) {
+                  paint.style = Paint.Style.FILL
+                  paint.color = color
+                  cv.drawRoundRect(r, 12 * d, 12 * d, paint)
+                  paint.color = textColor
+                  paint.textAlign = Paint.Align.CENTER
+                  paint.textSize = 14 * d
+                  paint.isFakeBoldText = true
+                  cv.drawText(label, r.centerX(), r.centerY() + 5 * d, paint)
+                  paint.isFakeBoldText = false
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  cv.drawColor(Color.argb(150, 8, 12, 22))
+                  paint.style = Paint.Style.FILL
+                  paint.textAlign = Paint.Align.LEFT
+                  paint.color = Color.WHITE
+                  paint.textSize = 18 * d
+                  paint.isFakeBoldText = true
+                  cv.drawText("Mode pemetaan", 20 * d, 36 * d, paint)
+                  paint.isFakeBoldText = false
+                  paint.textSize = 12 * d
+                  paint.color = Color.argb(215, 255, 255, 255)
+                  cv.drawText("Seret lingkaran ke tombol di layar game. Ketuk lingkaran untuk aktif atau mati.", 20 * d, 56 * d, paint)
+                  cv.drawText("Tekan tombol gamepad untuk melihat lingkaran miliknya berkedip.", 20 * d, 72 * d, paint)
+                  rSave.set(w - 150 * d, 14 * d, w - 16 * d, 58 * d)
+                  rReset.set(w - 310 * d, 14 * d, w - 166 * d, 58 * d)
+                  button(cv, rSave, "Simpan", Color.rgb(47, 163, 107), Color.rgb(8, 51, 31))
+                  button(cv, rReset, "Atur ulang", Color.rgb(43, 54, 80), Color.WHITE)
+                  val now = SystemClock.uptimeMillis()
+                  Pad.keys.forEachIndexed { i, k ->
+                      val cx = xs[i] * w
+                      val cy = ys[i] * h
+                      val r = 26 * d
+                      if (i == flashIdx && now < flashUntil) {
+                          paint.style = Paint.Style.FILL
+                          paint.color = Color.argb(200, 255, 210, 74)
+                          cv.drawCircle(cx, cy, r + 9 * d, paint)
+                      }
+                      paint.style = Paint.Style.FILL
+                      paint.color = if (on[i]) Color.argb(235, 47, 163, 107) else Color.argb(160, 90, 96, 110)
+                      cv.drawCircle(cx, cy, r, paint)
+                      paint.style = Paint.Style.STROKE
+                      paint.strokeWidth = 2 * d
+                      paint.color = Color.argb(if (on[i]) 230 else 110, 255, 255, 255)
+                      cv.drawCircle(cx, cy, r, paint)
+                      paint.style = Paint.Style.FILL
+                      paint.color = Color.WHITE
+                      paint.textAlign = Paint.Align.CENTER
+                      paint.textSize = 12 * d
+                      cv.drawText(k.second, cx, cy + 4 * d, paint)
+                  }
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          press = if (rSave.contains(e.x, e.y)) 1 else if (rReset.contains(e.x, e.y)) 2 else 0
+                          cur = -1
+                          if (press == 0) {
+                              var best = 40 * d
+                              for (i in 0 until n) {
+                                  val dist = Math.hypot((xs[i] * width - e.x).toDouble(), (ys[i] * height - e.y).toDouble()).toFloat()
+                                  if (dist < best) {
+                                      best = dist
+                                      cur = i
+                                  }
+                              }
+                          }
+                          downX = e.x
+                          downY = e.y
+                          moved = false
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          if (cur >= 0) {
+                              if (Math.hypot((e.x - downX).toDouble(), (e.y - downY).toDouble()) > 12 * d) moved = true
+                              if (moved) {
+                                  xs[cur] = (e.x / width).coerceIn(0f, 1f)
+                                  ys[cur] = (e.y / height).coerceIn(0f, 1f)
+                                  invalidate()
+                              }
+                          }
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          if (press == 1) {
+                              if (rSave.contains(e.x, e.y)) onDone()
+                          } else if (press == 2) {
+                              if (rReset.contains(e.x, e.y)) {
+                                  for (i in 0 until n) setDefault(i)
+                                  invalidate()
+                              }
+                          } else if (cur >= 0) {
+                              if (!moved) on[cur] = !on[cur]
+                              Pad.save(context, Pad.keys[cur].first, xs[cur], ys[cur], on[cur])
+                              invalidate()
+                          }
+                      }
+                  }
+                  return true
+              }
+          }
+          EOF
+      - name: Bangun APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PadMap-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
