@@ -15,23 +15,26 @@ jobs:
           gradle-version: "8.7"
       - name: Tulis file proyek
         run: |
-          mkdir -p app/src/main/java/com/rizal/padmap app/src/main/res/values app/src/main/res/xml
+          mkdir -p .
           cat > settings.gradle.kts <<'EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
           rootProject.name = "PadMap"
           include(":app")
           EOF
+          mkdir -p .
           cat > build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application") version "8.5.2" apply false
               id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
           EOF
+          mkdir -p .
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2g
           android.nonTransitiveRClass=true
           EOF
+          mkdir -p app
           cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
@@ -44,8 +47,8 @@ jobs:
                   applicationId = "com.rizal.padmap"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "1.1"
+                  versionCode = 4
+                  versionName = "1.3"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -54,10 +57,11 @@ jobs:
               kotlinOptions { jvmTarget = "17" }
           }
           EOF
+          mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application android:label="@string/app_name" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+              <application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="@string/app_name" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -79,6 +83,7 @@ jobs:
               </application>
           </manifest>
           EOF
+          mkdir -p app/src/main/res/values
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
@@ -86,6 +91,7 @@ jobs:
               <string name="desc">Mengubah tombol gamepad menjadi ketukan layar di titik yang kamu atur, dengan bola melayang untuk pemetaan. Tidak membaca isi layar.</string>
           </resources>
           EOF
+          mkdir -p app/src/main/res/xml
           cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
@@ -97,11 +103,14 @@ jobs:
               android:description="@string/desc"
               android:notificationTimeout="100" />
           EOF
+          mkdir -p app/src/main/java/com/rizal/padmap
           cat > app/src/main/java/com/rizal/padmap/Pad.kt <<'EOF'
           package com.rizal.padmap
 
           import android.content.Context
+          import android.util.DisplayMetrics
           import android.view.KeyEvent
+          import android.view.WindowManager
 
           object Pad {
               var paused = false
@@ -113,8 +122,40 @@ jobs:
                   KeyEvent.KEYCODE_BUTTON_L2 to "LT", KeyEvent.KEYCODE_BUTTON_R2 to "RT",
                   KeyEvent.KEYCODE_BUTTON_THUMBL to "L3", KeyEvent.KEYCODE_BUTTON_THUMBR to "R3",
                   KeyEvent.KEYCODE_DPAD_UP to "Atas", KeyEvent.KEYCODE_DPAD_DOWN to "Bawah",
-                  KeyEvent.KEYCODE_DPAD_LEFT to "Kiri", KeyEvent.KEYCODE_DPAD_RIGHT to "Kanan"
+                  KeyEvent.KEYCODE_DPAD_LEFT to "Kiri", KeyEvent.KEYCODE_DPAD_RIGHT to "Kanan",
+                  KeyEvent.KEYCODE_BUTTON_START to "Start", KeyEvent.KEYCODE_BUTTON_SELECT to "Select",
+                  KeyEvent.KEYCODE_BUTTON_MODE to "Mode"
               )
+
+              private val ignored = setOf(
+                  KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_POWER,
+                  KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_MUTE,
+                  KeyEvent.KEYCODE_APP_SWITCH, KeyEvent.KEYCODE_CAMERA, KeyEvent.KEYCODE_UNKNOWN
+              )
+
+              fun isMappable(code: Int) = code !in ignored
+
+              fun label(code: Int): String =
+                  KeyEvent.keyCodeToString(code).removePrefix("KEYCODE_").removePrefix("BUTTON_").replace("_", " ").take(6)
+
+              fun extras(c: Context): List<Int> =
+                  (prefs(c).getString("extras", "") ?: "").split(",").mapNotNull { it.toIntOrNull() }
+
+              fun addExtra(c: Context, code: Int) {
+                  val cur = extras(c)
+                  if (code in cur) return
+                  prefs(c).edit().putString("extras", (cur + code).joinToString(",")).apply()
+              }
+
+              fun all(c: Context): List<Pair<Int, String>> =
+                  keys + extras(c).filter { code -> keys.none { it.first == code } }.map { Pair(it, label(it)) }
+
+              @Suppress("DEPRECATION")
+              fun real(c: Context): DisplayMetrics {
+                  val dm = DisplayMetrics()
+                  (c.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
+                  return dm
+              }
 
               fun prefs(c: Context) = c.getSharedPreferences("pad", Context.MODE_PRIVATE)
 
@@ -134,7 +175,8 @@ jobs:
 
               fun resetKeys(c: Context) {
                   val e = prefs(c).edit()
-                  keys.forEach { e.remove("k${it.first}") }
+                  all(c).forEach { e.remove("k${it.first}") }
+                  e.remove("extras")
                   e.apply()
               }
 
@@ -152,6 +194,7 @@ jobs:
               }
           }
           EOF
+          mkdir -p app/src/main/java/com/rizal/padmap
           cat > app/src/main/java/com/rizal/padmap/PadService.kt <<'EOF'
           package com.rizal.padmap
 
@@ -165,7 +208,6 @@ jobs:
           import android.graphics.Path
           import android.graphics.PixelFormat
           import android.os.Build
-          import android.util.DisplayMetrics
           import android.view.Gravity
           import android.view.KeyEvent
           import android.view.MotionEvent
@@ -325,8 +367,8 @@ jobs:
               override fun onKeyEvent(event: KeyEvent): Boolean {
                   val ed = editor
                   if (ed != null) {
-                      if (event.action == KeyEvent.ACTION_DOWN) ed.flash(event.keyCode)
-                      return Pad.keys.any { it.first == event.keyCode }
+                      if (event.action == KeyEvent.ACTION_DOWN) ed.note(event.keyCode)
+                      return Pad.isMappable(event.keyCode)
                   }
                   if (Pad.paused) return false
                   val p = Pad.load(this, event.keyCode) ?: return false
@@ -335,24 +377,22 @@ jobs:
                   return true
               }
 
-              @Suppress("DEPRECATION")
-              private fun screen(): DisplayMetrics {
-                  val dm = DisplayMetrics()
-                  wm?.defaultDisplay?.getRealMetrics(dm)
-                  return dm
-              }
-
               private fun tap(fx: Float, fy: Float) {
-                  val dm = screen()
+                  val dm = Pad.real(this)
                   val path = Path()
                   path.moveTo(fx * dm.widthPixels, fy * dm.heightPixels)
                   val g = GestureDescription.Builder()
-                      .addStroke(GestureDescription.StrokeDescription(path, 0, 40))
+                      .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
                       .build()
-                  dispatchGesture(g, null, null)
+                  dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+                      override fun onCancelled(gestureDescription: GestureDescription?) {
+                          Toast.makeText(this@PadService, "Ketukan dibatalkan oleh sistem", Toast.LENGTH_SHORT).show()
+                      }
+                  }, null)
               }
           }
           EOF
+          mkdir -p app/src/main/java/com/rizal/padmap
           cat > app/src/main/java/com/rizal/padmap/MainActivity.kt <<'EOF'
           package com.rizal.padmap
 
@@ -376,6 +416,7 @@ jobs:
               private lateinit var st: TextView
               private lateinit var sw: Switch
               private lateinit var keys: TextView
+              private lateinit var hint: TextView
 
               private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -441,6 +482,9 @@ jobs:
                   row.addView(dot)
                   row.addView(st)
                   c1.addView(row)
+                  hint = tv("Kalau tombol izin tidak bisa ditekan, matikan sementara bola bantuan atau aplikasi pengambang lain, lalu nyalakan lagi setelah PadMap aktif.", 13f, "#9AA6C0")
+                  hint.setPadding(0, dp(10), 0, 0)
+                  c1.addView(hint)
                   c1.addView(btn("Buka pengaturan Aksesibilitas", true) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
                   root.addView(c1)
 
@@ -463,7 +507,7 @@ jobs:
 
                   val c4 = card()
                   c4.addView(tv("Cara pakai", 14f, "#9AA6C0"))
-                                    val how = tv("1. Aktifkan PadMap di Aksesibilitas.\n2. Buka game, lalu ketuk bola PM.\n3. Seret lingkaran ke tombol di layar game, lalu Simpan.\n4. Tekan tombol gamepad untuk mengetuk titik itu.", 15f)
+                  val how = tv("1. Aktifkan PadMap di Aksesibilitas.\n2. Buka game, lalu ketuk bola PM.\n3. Seret lingkaran ke tombol di layar game, lalu Simpan.\n4. Tekan tombol gamepad untuk mengetuk titik itu.\n\nTombol yang belum ada di daftar akan muncul sendiri saat kamu menekannya di mode pemetaan.", 15f)
                   how.setPadding(0, dp(6), 0, 0)
                   c4.addView(how)
                   root.addView(c4)
@@ -483,6 +527,7 @@ jobs:
                   val list = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
                   val en = list.contains(packageName)
                   st.text = if (en) "Layanan aktif" else "Layanan belum aktif"
+                  hint.visibility = if (en) View.GONE else View.VISIBLE
                   val g = GradientDrawable()
                   g.shape = GradientDrawable.OVAL
                   g.setColor(Color.parseColor(if (en) "#2FA36B" else "#E5534B"))
@@ -493,11 +538,12 @@ jobs:
                       Pad.setBubble(this, on)
                       PadService.inst?.refresh()
                   }
-                  val act = Pad.keys.filter { Pad.load(this, it.first)?.third == true }.map { it.second }
+                  val act = Pad.all(this).filter { Pad.load(this, it.first)?.third == true }.map { it.second }
                   keys.text = if (act.isEmpty()) "Belum diatur" else act.joinToString(", ")
               }
           }
           EOF
+          mkdir -p app/src/main/java/com/rizal/padmap
           cat > app/src/main/java/com/rizal/padmap/PadView.kt <<'EOF'
           package com.rizal.padmap
 
@@ -509,16 +555,17 @@ jobs:
           import android.os.SystemClock
           import android.view.MotionEvent
           import android.view.View
+          import android.widget.Toast
 
           class PadView(c: Context, private val onDone: () -> Unit) : View(c) {
+              private class Item(val code: Int, val label: String, var x: Float, var y: Float, var on: Boolean)
+
               private val d = resources.displayMetrics.density
-              private val n = Pad.keys.size
-              private val xs = FloatArray(n)
-              private val ys = FloatArray(n)
-              private val on = BooleanArray(n)
+              private val items = ArrayList<Item>()
               private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
               private val rSave = RectF()
               private val rReset = RectF()
+              private val loc = IntArray(2)
               private var cur = -1
               private var press = 0
               private var downX = 0f
@@ -527,32 +574,29 @@ jobs:
               private var flashIdx = -1
               private var flashUntil = 0L
 
-              private fun setDefault(i: Int) {
-                  xs[i] = 0.15f + 0.1f * (i % 8)
-                  ys[i] = 0.4f + 0.18f * (i / 8)
-                  on[i] = i < 4
-              }
+              private fun defX(i: Int) = 0.12f + 0.09f * (i % 9)
+              private fun defY(i: Int) = 0.4f + 0.16f * (i / 9)
 
               init {
-                  Pad.keys.forEachIndexed { i, k ->
+                  Pad.all(c).forEachIndexed { i, k ->
                       val s = Pad.load(c, k.first)
-                      if (s != null) {
-                          xs[i] = s.first
-                          ys[i] = s.second
-                          on[i] = s.third
-                      } else {
-                          setDefault(i)
-                      }
+                      items.add(Item(k.first, k.second, s?.first ?: defX(i), s?.second ?: defY(i), s?.third ?: (i < 4)))
                   }
               }
 
               fun saveAll() {
-                  Pad.keys.forEachIndexed { i, k -> Pad.save(context, k.first, xs[i], ys[i], on[i]) }
+                  items.forEach { Pad.save(context, it.code, it.x, it.y, it.on) }
               }
 
-              fun flash(code: Int) {
-                  val i = Pad.keys.indexOfFirst { it.first == code }
-                  if (i < 0) return
+              fun note(code: Int) {
+                  var i = items.indexOfFirst { it.code == code }
+                  if (i < 0) {
+                      if (!Pad.isMappable(code)) return
+                      Pad.addExtra(context, code)
+                      i = items.size
+                      items.add(Item(code, Pad.label(code), defX(i), defY(i), true))
+                      Toast.makeText(context, "Tombol baru terdeteksi: " + Pad.label(code), Toast.LENGTH_SHORT).show()
+                  }
                   flashIdx = i
                   flashUntil = SystemClock.uptimeMillis() + 450
                   invalidate()
@@ -573,7 +617,10 @@ jobs:
 
               override fun onDraw(cv: Canvas) {
                   val w = width.toFloat()
-                  val h = height.toFloat()
+                  getLocationOnScreen(loc)
+                  val dm = Pad.real(context)
+                  val rw = dm.widthPixels.toFloat()
+                  val rh = dm.heightPixels.toFloat()
                   cv.drawColor(Color.argb(150, 8, 12, 22))
                   paint.style = Paint.Style.FILL
                   paint.textAlign = Paint.Align.LEFT
@@ -585,15 +632,15 @@ jobs:
                   paint.textSize = 12 * d
                   paint.color = Color.argb(215, 255, 255, 255)
                   cv.drawText("Seret lingkaran ke tombol di layar game. Ketuk lingkaran untuk aktif atau mati.", 20 * d, 56 * d, paint)
-                  cv.drawText("Tekan tombol gamepad untuk melihat lingkaran miliknya berkedip.", 20 * d, 72 * d, paint)
+                  cv.drawText("Tekan tombol gamepad: lingkarannya berkedip. Tombol baru muncul otomatis.", 20 * d, 72 * d, paint)
                   rSave.set(w - 150 * d, 14 * d, w - 16 * d, 58 * d)
                   rReset.set(w - 310 * d, 14 * d, w - 166 * d, 58 * d)
                   button(cv, rSave, "Simpan", Color.rgb(47, 163, 107), Color.rgb(8, 51, 31))
                   button(cv, rReset, "Atur ulang", Color.rgb(43, 54, 80), Color.WHITE)
                   val now = SystemClock.uptimeMillis()
-                  Pad.keys.forEachIndexed { i, k ->
-                      val cx = xs[i] * w
-                      val cy = ys[i] * h
+                  items.forEachIndexed { i, it ->
+                      val cx = it.x * rw - loc[0]
+                      val cy = it.y * rh - loc[1]
                       val r = 26 * d
                       if (i == flashIdx && now < flashUntil) {
                           paint.style = Paint.Style.FILL
@@ -601,45 +648,48 @@ jobs:
                           cv.drawCircle(cx, cy, r + 9 * d, paint)
                       }
                       paint.style = Paint.Style.FILL
-                      paint.color = if (on[i]) Color.argb(235, 47, 163, 107) else Color.argb(160, 90, 96, 110)
+                      paint.color = if (it.on) Color.argb(235, 47, 163, 107) else Color.argb(160, 90, 96, 110)
                       cv.drawCircle(cx, cy, r, paint)
                       paint.style = Paint.Style.STROKE
                       paint.strokeWidth = 2 * d
-                      paint.color = Color.argb(if (on[i]) 230 else 110, 255, 255, 255)
+                      paint.color = Color.argb(if (it.on) 230 else 110, 255, 255, 255)
                       cv.drawCircle(cx, cy, r, paint)
                       paint.style = Paint.Style.FILL
                       paint.color = Color.WHITE
                       paint.textAlign = Paint.Align.CENTER
-                      paint.textSize = 12 * d
-                      cv.drawText(k.second, cx, cy + 4 * d, paint)
+                      paint.textSize = 11 * d
+                      cv.drawText(it.label, cx, cy + 4 * d, paint)
                   }
               }
 
               override fun onTouchEvent(e: MotionEvent): Boolean {
+                  val dm = Pad.real(context)
+                  val rw = dm.widthPixels.toFloat()
+                  val rh = dm.heightPixels.toFloat()
                   when (e.actionMasked) {
                       MotionEvent.ACTION_DOWN -> {
                           press = if (rSave.contains(e.x, e.y)) 1 else if (rReset.contains(e.x, e.y)) 2 else 0
                           cur = -1
                           if (press == 0) {
                               var best = 40 * d
-                              for (i in 0 until n) {
-                                  val dist = Math.hypot((xs[i] * width - e.x).toDouble(), (ys[i] * height - e.y).toDouble()).toFloat()
+                              items.forEachIndexed { i, it ->
+                                  val dist = Math.hypot((it.x * rw - e.rawX).toDouble(), (it.y * rh - e.rawY).toDouble()).toFloat()
                                   if (dist < best) {
                                       best = dist
                                       cur = i
                                   }
                               }
                           }
-                          downX = e.x
-                          downY = e.y
+                          downX = e.rawX
+                          downY = e.rawY
                           moved = false
                       }
                       MotionEvent.ACTION_MOVE -> {
                           if (cur >= 0) {
-                              if (Math.hypot((e.x - downX).toDouble(), (e.y - downY).toDouble()) > 12 * d) moved = true
+                              if (Math.hypot((e.rawX - downX).toDouble(), (e.rawY - downY).toDouble()) > 12 * d) moved = true
                               if (moved) {
-                                  xs[cur] = (e.x / width).coerceIn(0f, 1f)
-                                  ys[cur] = (e.y / height).coerceIn(0f, 1f)
+                                  items[cur].x = (e.rawX / rw).coerceIn(0f, 1f)
+                                  items[cur].y = (e.rawY / rh).coerceIn(0f, 1f)
                                   invalidate()
                               }
                           }
@@ -649,12 +699,17 @@ jobs:
                               if (rSave.contains(e.x, e.y)) onDone()
                           } else if (press == 2) {
                               if (rReset.contains(e.x, e.y)) {
-                                  for (i in 0 until n) setDefault(i)
+                                  items.forEachIndexed { i, it ->
+                                      it.x = defX(i)
+                                      it.y = defY(i)
+                                      it.on = i < 4
+                                  }
                                   invalidate()
                               }
                           } else if (cur >= 0) {
-                              if (!moved) on[cur] = !on[cur]
-                              Pad.save(context, Pad.keys[cur].first, xs[cur], ys[cur], on[cur])
+                              val it = items[cur]
+                              if (!moved) it.on = !it.on
+                              Pad.save(context, it.code, it.x, it.y, it.on)
                               invalidate()
                           }
                       }
@@ -662,6 +717,48 @@ jobs:
                   return true
               }
           }
+          EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_bg">#0F1626</color>
+          </resources>
+          EOF
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
+          EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_fg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M36,44H72A10,10 0 0 1 82,54V58A10,10 0 0 1 72,68H66L62,62H46L42,68H36A10,10 0 0 1 26,58V54A10,10 0 0 1 36,44Z" />
+              <path
+                  android:fillColor="#0F1626"
+                  android:pathData="M36,53H40V49H44V53H48V57H44V61H40V57H36Z" />
+              <path
+                  android:fillColor="#2FA36B"
+                  android:pathData="M63,51a3,3 0 1,0 6,0a3,3 0 1,0 -6,0Z" />
+              <path
+                  android:fillColor="#2FA36B"
+                  android:pathData="M69,57a3,3 0 1,0 6,0a3,3 0 1,0 -6,0Z" />
+              <path
+                  android:fillColor="#00000000"
+                  android:strokeColor="#2FA36B"
+                  android:strokeWidth="3"
+                  android:pathData="M68,40a6,6 0 1,0 12,0a6,6 0 1,0 -12,0Z" />
+          </vector>
           EOF
       - name: Bangun APK
         run: gradle assembleDebug --no-daemon
